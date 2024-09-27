@@ -95,7 +95,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                     Operand rd = Register(rdIndex++, RegisterType.Gpr);
 
-                    TextureOperation operation = new TextureOperation(
+                    TextureOperation operation = context.CreateTextureOperation(
                         Instruction.ImageLoad,
                         type,
                         flags,
@@ -132,17 +132,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                     Operand rd = Register(rdIndex++, RegisterType.Gpr);
 
-                    TextureOperation operation = new TextureOperation(
+                    TextureOperation operation = context.CreateTextureOperation(
                         Instruction.ImageLoad,
                         type,
+                        GetTextureFormat(op.Size),
                         flags,
                         handle,
                         compIndex,
                         rd,
-                        sources)
-                    {
-                        Format = GetTextureFormat(op.Size)
-                    };
+                        sources);
 
                     context.Add(operation);
 
@@ -266,17 +264,258 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             TextureFlags flags = op.IsBindless ? TextureFlags.Bindless : TextureFlags.None;
 
-            TextureOperation operation = new TextureOperation(
+            TextureOperation operation = context.CreateTextureOperation(
                 Instruction.ImageStore,
                 type,
+                format,
                 flags,
                 handle,
                 0,
                 null,
-                sources)
+                sources);
+
+            context.Add(operation);
+        }
+
+        public static void Sured(EmitterContext context)
+        {
+            OpCodeSured op = (OpCodeSured)context.CurrOp;
+
+            SamplerType type = ConvertSamplerType(op.Dimensions);
+
+            if (type == SamplerType.None)
             {
-                Format = format
-            };
+                context.Config.GpuAccessor.Log("Invalid image reduction sampler type.");
+
+                return;
+            }
+
+            int raIndex = op.Ra.Index;
+            int rbIndex = op.Rb.Index;
+
+            Operand Ra()
+            {
+                if (raIndex > RegisterConsts.RegisterZeroIndex)
+                {
+                    return Const(0);
+                }
+
+                return context.Copy(Register(raIndex++, RegisterType.Gpr));
+            }
+
+            Operand Rb()
+            {
+                if (rbIndex > RegisterConsts.RegisterZeroIndex)
+                {
+                    return Const(0);
+                }
+
+                return context.Copy(Register(rbIndex++, RegisterType.Gpr));
+            }
+
+            List<Operand> sourcesList = new List<Operand>();
+
+            if (op.IsBindless)
+            {
+                sourcesList.Add(context.Copy(Register(op.Rc)));
+            }
+
+            int coordsCount = type.GetDimensions();
+
+            for (int index = 0; index < coordsCount; index++)
+            {
+                sourcesList.Add(Ra());
+            }
+
+            if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)
+            {
+                sourcesList.Add(Const(0));
+
+                type &= ~SamplerType.Mask;
+                type |= SamplerType.Texture2D;
+            }
+
+            if (type.HasFlag(SamplerType.Array))
+            {
+                sourcesList.Add(Ra());
+
+                type |= SamplerType.Array;
+            }
+
+            TextureFormat format = TextureFormat.R32Sint;
+
+            if (op.UseType)
+            {
+                if (op.ByteAddress)
+                {
+                    int xIndex = op.IsBindless ? 1 : 0;
+
+                    sourcesList[xIndex] = context.ShiftRightS32(sourcesList[xIndex], Const(GetComponentSizeInBytesLog2(op.Type)));
+                }
+
+                // TODO: FP and 64-bit formats.
+                format = (op.Type == ReductionType.SD32 || op.Type == ReductionType.SD64) ?
+                    context.Config.GetTextureFormatAtomic(op.HandleOffset) :
+                    GetTextureFormat(op.Type);
+            }
+            else if (!op.IsBindless)
+            {
+                format = context.Config.GetTextureFormatAtomic(op.HandleOffset);
+            }
+
+            sourcesList.Add(Rb());
+
+            Operand[] sources = sourcesList.ToArray();
+
+            int handle = op.HandleOffset;
+
+            TextureFlags flags = GetAtomicOpFlags(op.AtomicOp);
+
+            if (op.IsBindless)
+            {
+                handle = 0;
+                flags |= TextureFlags.Bindless;
+            }
+
+            TextureOperation operation = context.CreateTextureOperation(
+                Instruction.ImageAtomic,
+                type,
+                format,
+                flags,
+                handle,
+                0,
+                null,
+                sources);
+
+            context.Add(operation);
+        }
+
+        public static void Suatom(EmitterContext context)
+        {
+            OpCodeSuatom op = (OpCodeSuatom)context.CurrOp;
+
+            SamplerType type = ConvertSamplerType(op.Dimensions);
+
+            if (type == SamplerType.None)
+            {
+                context.Config.GpuAccessor.Log("Invalid image atomic sampler type.");
+
+                return;
+            }
+
+            int raIndex = op.Ra.Index;
+            int rbIndex = op.Rb.Index;
+
+            Operand Ra()
+            {
+                if (raIndex > RegisterConsts.RegisterZeroIndex)
+                {
+                    return Const(0);
+                }
+
+                return context.Copy(Register(raIndex++, RegisterType.Gpr));
+            }
+
+            Operand Rb()
+            {
+                if (rbIndex > RegisterConsts.RegisterZeroIndex)
+                {
+                    return Const(0);
+                }
+
+                return context.Copy(Register(rbIndex++, RegisterType.Gpr));
+            }
+
+            int rdIndex = op.Rd.Index;
+
+            Operand GetDest()
+            {
+                if (rdIndex > RegisterConsts.RegisterZeroIndex)
+                {
+                    return Const(0);
+                }
+
+                return Register(rdIndex++, RegisterType.Gpr);
+            }
+
+            List<Operand> sourcesList = new List<Operand>();
+
+            if (op.IsBindless)
+            {
+                sourcesList.Add(context.Copy(Register(op.Rc)));
+            }
+
+            int coordsCount = type.GetDimensions();
+
+            for (int index = 0; index < coordsCount; index++)
+            {
+                sourcesList.Add(Ra());
+            }
+
+            if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)
+            {
+                sourcesList.Add(Const(0));
+
+                type &= ~SamplerType.Mask;
+                type |= SamplerType.Texture2D;
+            }
+
+            if (type.HasFlag(SamplerType.Array))
+            {
+                sourcesList.Add(Ra());
+
+                type |= SamplerType.Array;
+            }
+
+            TextureFormat format = TextureFormat.R32Sint;
+
+            if (op.UseType)
+            {
+                if (op.ByteAddress)
+                {
+                    int xIndex = op.IsBindless ? 1 : 0;
+
+                    sourcesList[xIndex] = context.ShiftRightS32(sourcesList[xIndex], Const(GetComponentSizeInBytesLog2(op.Type)));
+                }
+
+                // TODO: FP and 64-bit formats.
+                format = (op.Type == ReductionType.SD32 || op.Type == ReductionType.SD64) ?
+                    context.Config.GetTextureFormatAtomic(op.HandleOffset) :
+                    GetTextureFormat(op.Type);
+            }
+            else if (!op.IsBindless)
+            {
+                format = context.Config.GetTextureFormatAtomic(op.HandleOffset);
+            }
+
+            if (op.CompareAndSwap)
+            {
+                sourcesList.Add(Rb());
+            }
+
+            sourcesList.Add(Rb());
+
+            Operand[] sources = sourcesList.ToArray();
+
+            int handle = op.HandleOffset;
+
+            TextureFlags flags = op.CompareAndSwap ? TextureFlags.CAS : GetAtomicOpFlags(op.AtomicOp);
+
+            if (op.IsBindless)
+            {
+                handle = 0;
+                flags |= TextureFlags.Bindless;
+            }
+
+            TextureOperation operation = context.CreateTextureOperation(
+                Instruction.ImageAtomic,
+                type,
+                format,
+                flags,
+                handle,
+                0,
+                GetDest(),
+                sources);
 
             context.Add(operation);
         }
@@ -615,7 +854,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     Operand dest = GetDest();
 
-                    TextureOperation operation = new TextureOperation(
+                    TextureOperation operation = context.CreateTextureOperation(
                         Instruction.TextureSample,
                         type,
                         flags,
@@ -764,7 +1003,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     Operand dest = GetDest();
 
-                    TextureOperation operation = new TextureOperation(
+                    TextureOperation operation = context.CreateTextureOperation(
                         Instruction.TextureSample,
                         type,
                         flags,
@@ -888,12 +1127,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     {
                         Operand tempDest = Local();
 
-                        TextureOperation operation = new TextureOperation(
+                        TextureOperation operation = context.CreateTextureOperation(
                             Instruction.Lod,
                             type,
                             flags,
                             handle,
-                            compIndex,
+                            compIndex ^ 1, // The instruction component order is the inverse of GLSL's.
                             tempDest,
                             sources);
 
@@ -901,9 +1140,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                         tempDest = context.FPMultiply(tempDest, ConstF(256.0f));
 
-                        Operand finalValue = context.FPConvertToS32(tempDest);
+                        Operand fixedPointValue = context.FPConvertToS32(tempDest);
 
-                        context.Copy(dest, finalValue);
+                        context.Copy(dest, fixedPointValue);
                     }
                 }
             }
@@ -1027,7 +1266,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     Operand dest = GetDest();
 
-                    TextureOperation operation = new TextureOperation(
+                    TextureOperation operation = context.CreateTextureOperation(
                         Instruction.TextureSample,
                         type,
                         flags,
@@ -1059,6 +1298,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 return;
             }
+
+            context.Config.SetUsedFeature(FeatureFlags.IntegerSampling);
 
             TextureProperty property = (TextureProperty)op.RawOpCode.Extract(22, 6);
 
@@ -1112,7 +1353,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     Operand dest = GetDest();
 
-                    TextureOperation operation = new TextureOperation(
+                    TextureOperation operation = context.CreateTextureOperation(
                         inst,
                         type,
                         flags,
@@ -1277,7 +1518,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     Operand dest = GetDest();
 
-                    TextureOperation operation = new TextureOperation(
+                    TextureOperation operation = context.CreateTextureOperation(
                         Instruction.TextureSample,
                         type,
                         flags,
@@ -1331,6 +1572,55 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 IntegerSize.B128  => TextureFormat.R32G32B32A32Uint,
                 IntegerSize.UB128 => TextureFormat.R32G32B32A32Uint,
                 _                 => TextureFormat.R32Uint
+            };
+        }
+
+        private static int GetComponentSizeInBytesLog2(ReductionType type)
+        {
+            return type switch
+            {
+                ReductionType.U32         => 2,
+                ReductionType.S32         => 2,
+                ReductionType.U64         => 3,
+                ReductionType.FP32FtzRn   => 2,
+                ReductionType.FP16x2FtzRn => 2,
+                ReductionType.S64         => 3,
+                ReductionType.SD32        => 2,
+                ReductionType.SD64        => 3,
+                _                         => 2
+            };
+        }
+
+        private static TextureFormat GetTextureFormat(ReductionType type)
+        {
+            return type switch
+            {
+                ReductionType.U32         => TextureFormat.R32Uint,
+                ReductionType.S32         => TextureFormat.R32Sint,
+                ReductionType.U64         => TextureFormat.R32G32Uint,
+                ReductionType.FP32FtzRn   => TextureFormat.R32Float,
+                ReductionType.FP16x2FtzRn => TextureFormat.R16G16Float,
+                ReductionType.S64         => TextureFormat.R32G32Uint,
+                ReductionType.SD32        => TextureFormat.R32Uint,
+                ReductionType.SD64        => TextureFormat.R32G32Uint,
+                _                         => TextureFormat.R32Uint
+            };
+        }
+
+        private static TextureFlags GetAtomicOpFlags(AtomicOp op)
+        {
+            return op switch
+            {
+                AtomicOp.Add                => TextureFlags.Add,
+                AtomicOp.Minimum            => TextureFlags.Minimum,
+                AtomicOp.Maximum            => TextureFlags.Maximum,
+                AtomicOp.Increment          => TextureFlags.Increment,
+                AtomicOp.Decrement          => TextureFlags.Decrement,
+                AtomicOp.BitwiseAnd         => TextureFlags.BitwiseAnd,
+                AtomicOp.BitwiseOr          => TextureFlags.BitwiseOr,
+                AtomicOp.BitwiseExclusiveOr => TextureFlags.BitwiseXor,
+                AtomicOp.Swap               => TextureFlags.Swap,
+                _                           => TextureFlags.Add
             };
         }
 
